@@ -15,7 +15,7 @@ Rules for both:
 
 - **Never relay.** Mail is only ever stored, never forwarded to another server.
 - Parse each accepted message (the `mail-parser` crate is recommended) and POST it to Laravel.
-- Advertise `SIZE` as the max message size (default 26,214,400 bytes, see Limits) and reject larger messages with `552`.
+- Advertise `SIZE` as the max message size (default 5,242,880 bytes, see Limits) and reject larger messages with `552`.
 - Submission: require TLS before offering `AUTH` (PLAIN and LOGIN are enough).
 
 ### Catch listener (port 25)
@@ -26,7 +26,7 @@ Rules for both:
 
 ### Submission listener (port 587)
 
-1. On `AUTH`, call **Validate credentials**. 200 means authenticated (remember the `inbox_id` for the session); 401 means reply `535`; any other failure means `454` (temporary).
+1. On `AUTH`, call **Validate credentials**. 200 means authenticated (remember the `inbox_id` for the session); 404 means reply `535`; 401 (bad service token) means reply `454` and raise an alert; any other failure means `454` (temporary).
 2. After authentication, accept **any** recipient address. Do not validate recipients, because this inbox behaves like Mailtrap: everything sent is captured.
 3. After `DATA`, deliver one copy to the authenticated `inbox_id` regardless of the recipient count.
 
@@ -75,7 +75,8 @@ Limits: `username` is at most 64 characters and `password` at most 255.
 | Status | Meaning | Body |
 | --- | --- | --- |
 | 200 | Credentials valid | `{ "inbox_id": 42 }` |
-| 401 | Wrong username or password, or bad service token | none relied upon |
+| 404 | Wrong username or password | none relied upon |
+| 401 | Bad service token (a configuration error) | none relied upon |
 | 422 | Missing fields | validation errors |
 
 Laravel does **not** rate-limit this endpoint. The SMTP service must limit failed `AUTH` attempts per client IP and apply a delay or disconnect after repeated failures.
@@ -105,7 +106,7 @@ Notes on the fields:
 - `to` and `cc` come from the message **headers**, not the SMTP envelope. A Bcc recipient or a mailing-list delivery will therefore not appear in `to`, even though it was the envelope recipient. This is acceptable for now.
 - Use the part's own filename as the attachment name. Laravel stores whatever filename and content type you send, and serves downloads as `application/octet-stream`.
 - There is no inline-image (`Content-ID`) handling yet. Inline images arrive as ordinary attachments.
-- `raw` and each attachment must be at most `ROOSTLE_MAX_MESSAGE_KILOBYTES` (default 25,600 KB, i.e. 26,214,400 bytes).
+- `raw` and each attachment must be at most `ROOSTLE_MAX_MESSAGE_KILOBYTES` (default 5,120 KB, i.e. 5,242,880 bytes). Roostle is a testing tool, so messages are expected to be small.
 
 | Status | Meaning | Body |
 | --- | --- | --- |
@@ -120,6 +121,7 @@ Notes on the fields:
 | --- | --- |
 | 200 / 201 | `250 OK` |
 | 404 on recipient validation | `550 5.1.1 No such mailbox` |
+| 404 on credential validation | `535 5.7.8 Authentication failed` |
 | 422 caused by size (`raw` or `attachments.*`) | `552 5.3.4 Message too large` |
 | Other 422 | `554 5.6.0 Message rejected` (permanent, do not retry) |
 | 401 from Laravel (bad service token) | `451 4.3.0 Temporary error` **and raise an alert**: this is a misconfiguration, not the sender's fault |
@@ -131,7 +133,7 @@ Never expose Laravel's response bodies or the service token to SMTP clients.
 
 - Cache successful recipient validations in memory for 30 to 60 seconds, keyed by lowercased address. This keeps bursts of mail to one inbox cheap.
 - Cache **positive** credential results only if keyed by a hash of username plus password, with a TTL of at most 60 seconds. Never cache the plaintext password.
-- Do not cache 404 or 401 results for more than a few seconds. A new inbox must work almost immediately.
+- Do not cache 404 results for more than a few seconds. A new inbox must work almost immediately.
 - Note that a deleted inbox or regenerated password can remain valid for up to the cache TTL.
 
 ## Timeouts and retries
@@ -142,8 +144,8 @@ Never expose Laravel's response bodies or the service token to SMTP clients.
 
 ## Laravel and PHP limits to be aware of
 
-- A delivery request contains the `raw` message **and** each attachment again. A 25 MB message with 20 MB of attachments is about 45 MB of upload.
-- `upload_max_filesize` and `post_max_size` in `php.ini` (and the reverse proxy's body limit, for example nginx `client_max_body_size`) must be set high enough for this, roughly 2x the maximum message size. Otherwise deliveries fail with 413 or an empty 422.
+- A delivery request contains the `raw` message **and** each attachment again. A 5 MB message whose attachments total about 3.7 MB decoded is about 8.7 MB of upload.
+- `upload_max_filesize` and `post_max_size` in `php.ini` (and the reverse proxy's body limit, for example nginx `client_max_body_size`) must be set high enough for this, roughly 2x the maximum message size. The 5 MB default fits PHP limits of 10M (the Herd default) but not PHP's stock `upload_max_filesize` of 2M, so raise that on the server. Otherwise deliveries fail with 413 or an empty 422.
 - If you raise the message limit, change `ROOSTLE_MAX_MESSAGE_KILOBYTES` in Laravel and the advertised `SIZE` in the SMTP service together.
 
 ## Configuration the SMTP service needs
@@ -153,7 +155,7 @@ Never expose Laravel's response bodies or the service token to SMTP clients.
 | Laravel base URL | `https://roostle.co.uk` |
 | Service token | value of `ROOSTLE_SMTP_SERVICE_TOKEN` |
 | Catch domain | `catch.roostle.co.uk` (used for logging only, since Laravel validates the address) |
-| Max message size | `26214400` bytes |
+| Max message size | `5242880` bytes |
 | TLS certificate and key | for STARTTLS on the submission port |
 
 DNS: the `MX` record for `catch.roostle.co.uk` must point at the host running the SMTP service, with inbound port 25 open.
